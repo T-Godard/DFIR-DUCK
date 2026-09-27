@@ -1,0 +1,101 @@
+{# Table de runs de l'onglet Extraction.
+   Paramètres passés par l'appelant ({% with %}) : `tools` (liste d'outils),
+   `target` (id du bloc à remplacer après « Forcer ») et `show_steps`. #}
+{% if not inv.acquisitions %}
+  <div class="empty">Aucune acquisition à analyser pour le moment.</div>
+{% else %}
+  {% for acq in inv.acquisitions.values() | sort(attribute="created_at") %}
+    {% set truns = runs_by_acq.get(acq.id, {}) %}
+    {% set f = facts_by_acq.get(acq.id, {}) %}
+    <section class="card">
+      <div class="card-head">
+        <h2 class="card-title machine-name">{{ acq.name }}</h2>
+        {% if show_steps %}
+          <span class="card-note">
+            {%- if f.running %}Étape {{ f.steps_done }} / {{ f.steps_total }}
+            {%- else %}{{ f.steps_done }} / {{ f.steps_total }} traitements réussis{% endif -%}
+          </span>
+        {% endif %}
+      </div>
+
+      <table class="table table-runs">
+        <colgroup>
+          <col class="c-tool"><col class="c-state"><col class="c-time"><col class="c-mem">
+          <col class="c-cpu"><col class="c-res"><col class="c-act">
+        </colgroup>
+        <thead>
+          <tr>
+            <th>Outil</th><th>État</th><th>Durée</th><th>Mémoire</th><th>CPU</th>
+            <th>Résultat</th><th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for tool in tools %}
+            {% set run = truns.get(tool) %}
+            {% set busy = run and run.status in ("pending", "running") %}
+            <tr>
+              <td>{{ tool_labels.get(tool, tool) }}</td>
+              <td>
+                {% if run %}
+                  <span class="badge {{ run.status }}">{{ status_labels.get(run.status, run.status) }}</span>
+                  
+                {% else %}
+                  <span class="badge pending">&mdash;</span>
+                {% endif %}
+              </td>
+              <td class="num">
+                {%- set d = run_duration(run) -%}
+                {%- if d is not none %}{{ d | human_duration }}{% if run.status == "running" %} <span class="faint">en cours</span>{% endif %}
+                {%- else %}&mdash;{% endif -%}
+              </td>
+              <td class="num">
+                {# Uniquement pendant le run : une fois termine, `last_rss_bytes`
+                   n'est plus qu'un residu de la derniere mesure. #}
+                {%- if busy and run.last_rss_bytes -%}
+                  {{ run.last_rss_bytes | human_bytes }}
+                  {%- if run.mem_limit_bytes %} <span class="faint">/ {{ run.mem_limit_bytes | human_bytes }}</span>{% endif -%}
+                {%- else %}&mdash;{% endif -%}
+              </td>
+              <td class="num">
+                {%- if busy and run.last_cpu_percent is not none -%}
+                  {{ "%.0f" | format(run.last_cpu_percent) }} %
+                  <span class="faint">/ {% if run.cpu_cores_limit %}{{ (run.cpu_cores_limit * 100) | round | int }}{% else %}{{ resources.cpu_count * 100 }}{% endif %} %</span>
+                {%- else %}&mdash;{% endif -%}
+              </td>
+              <td class="num">
+                {%- if run and run.result -%}
+                  {%- if run.result.evtx_files is defined %}{{ run.result.evtx_files | fr_int }} journaux
+                  {%- elif run.result.mft_files is defined %}{{ run.result.mft_files | fr_int }} MFT
+                  {%- elif run.result.hive_files is defined %}{{ run.result.hive_files | fr_int }} ruches
+                  {%- elif run.result.shimcache_entries is defined %}{{ run.result.shimcache_entries | fr_int }} entrées
+                  {%- elif run.result.output_bytes is defined %}{{ run.result.output_bytes | human_bytes }}
+                  {%- elif run.result.detections is defined %}{{ run.result.detections | fr_int }} détections
+                  {%- endif -%}
+                {%- else %}&mdash;{% endif -%}
+              </td>
+              <td class="row-actions">
+                <button type="button" class="btn btn-sm btn-danger"
+                        hx-post="/investigations/{{ inv.id }}/acquisitions/{{ acq.id }}/runs"
+                        hx-vals='{"tool": "{{ tool }}"}'
+                        hx-target="#{{ target }}" hx-swap="outerHTML"
+                        {% if busy %}disabled{% endif %}>Forcer</button>
+                {% if run and run.log_path %}
+                  <button type="button" class="btn btn-sm btn-accent"
+                          hx-get="/investigations/{{ inv.id }}/runs/{{ run.id }}/log"
+                          hx-target="#run-log" hx-swap="innerHTML">Log</button>
+                {% else %}
+                  {# Emplacement reserve : sans lui, « Forcer » saute d'une ligne
+                     a l'autre selon la presence du bouton Log. #}
+                  <span class="btn btn-sm btn-ghost" aria-hidden="true">Log</span>
+                {% endif %}
+              </td>
+            </tr>
+            {% if run and run.error %}
+              <tr><td colspan="7" class="run-error">{{ run.error }}</td></tr>
+            {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  {% endfor %}
+{% endif %}

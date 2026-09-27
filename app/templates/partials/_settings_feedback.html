@@ -1,0 +1,9 @@
+{# Réponse à un enregistrement de l'onglet Paramètres : rien n'est remplacé à
+   la cible (`hx-swap="none"`), seul ce fragment l'est, par son id. Le
+   formulaire reste donc en place, avec le focus et le curseur.
+
+   Tout ce qui dépend d'un réglage doit figurer ici : un fragment oublié reste
+   à contresens jusqu'au prochain chargement de la page. #}
+{% with oob = true %}
+  {% include "partials/_settings_status.html" %}
+{% endwith %}

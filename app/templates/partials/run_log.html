@@ -1,0 +1,51 @@
+{% if run %}
+{# Un run terminé n'écrit plus : le sondage ne ferait que rejouer le même
+   contenu, en coupant la sélection de texte à chaque tour. #}
+{% set live = run.status in ("pending", "running") %}
+<div class="modal-overlay"
+     {% if live %}
+     hx-get="/investigations/{{ inv.id }}/runs/{{ run.id }}/log?tail={{ tail }}"
+     hx-trigger="every 3s"
+     hx-target="#run-log"
+     hx-swap="innerHTML"
+     {% endif %}
+     onclick="if(event.target===this){document.getElementById('run-log').innerHTML='';}">
+  <div class="modal-panel" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <span class="modal-title">
+        {{ tool_labels.get(run.tool, run.tool) }}
+        <span class="badge {{ run.status }}">{{ status_labels.get(run.status, run.status) }}</span>
+        <span class="faint num">{{ run.id }}</span>
+        {% if live %}<span class="faint">rafraîchi toutes les 3 s</span>{% endif %}
+      </span>
+      <button type="button" class="modal-close"
+              onclick="document.getElementById('run-log').innerHTML='';"
+              aria-label="Fermer">&times;</button>
+    </div>
+    <div class="modal-body">
+      {% if run.command %}<p class="muted mono-wrap"><code>{{ run.command | join(' ') }}</code></p>{% endif %}
+      {# Assemble d'abord, joint ensuite : pas de « · » orphelin quand une
+         information manque (run sans résultat, sans mesure mémoire...). #}
+      {%- set bits = [] -%}
+      {%- set d = run_duration(run) -%}
+      {%- if d is not none %}{{ bits.append(d | human_duration) or "" }}{% endif -%}
+      {%- if run.last_rss_bytes %}{{ bits.append((run.last_rss_bytes | human_bytes) ~ " de mémoire") or "" }}{% endif -%}
+      {%- if run.result %}{{ bits.append(result_summary(run)) or "" }}{% endif -%}
+      {% if bits %}<p class="faint num">{{ bits | join(" · ") }}</p>{% endif %}
+      {% if run.error %}<p class="run-error">{{ run.error }}</p>{% endif %}
+      <pre class="run-log">{{ log or "(log vide)" }}</pre>
+      <p class="faint">{{ tail }} dernières lignes &middot; <code>{{ run.log_path }}</code></p>
+    </div>
+  </div>
+</div>
+{% else %}
+<div class="modal-overlay" onclick="if(event.target===this){document.getElementById('run-log').innerHTML='';}">
+  <div class="modal-panel" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <span class="modal-title">Log</span>
+      <button type="button" class="modal-close" onclick="document.getElementById('run-log').innerHTML='';">&times;</button>
+    </div>
+    <div class="modal-body"><p class="muted">Run introuvable.</p></div>
+  </div>
+</div>
+{% endif %}

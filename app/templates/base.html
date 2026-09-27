@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}DFIR DUCK{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <!-- htmx servi localement (depot auto-heberge / air-gap possible) -->
+  <script src="/static/vendor/htmx.min.js"></script>
+  <script>
+    // Upload d'acquisitions DFIR-ORC : géré à la main plutôt qu'en hx-post
+    // déclaratif, car la sérialisation multipart implicite d'un <form> ne
+    // garantit pas de préserver le chemin relatif (webkitRelativePath) des
+    // fichiers choisis via un input "webkitdirectory" — chemin dont le
+    // backend a besoin pour regrouper automatiquement les fichiers par
+    // acquisition. Écouteur posé sur `document` (délégation) : il survit
+    // aux remplacements de #upload-result par htmx.
+    //
+    // Upload PAR MORCEAUX (chunks) plutôt qu'en une seule requête, même
+    // pour un fichier de plusieurs Go : sur un lien instable (partage de
+    // connexion mobile + VPN), une requête HTTP unique très longue est
+    // fragile — une seule coupure ou un 502 en cours de route (proxy,
+    // NAT, VPN) perd tout le transfert. En découpant en morceaux de
+    // quelques Mo envoyés un par un, chaque requête individuelle est
+    // courte, et un morceau en échec est réessayé seul (avec backoff),
+    // sans jamais retransmettre ce qui a déjà été reçu par le serveur.
+    (function () {
+      var CHUNK_SIZE = 16 * 1024 * 1024; // 16 Mo par morceau
+      var MAX_ATTEMPTS_PER_CHUNK = 6;
+      var RETRY_BASE_DELAY_MS = 1000;
+
+      function humanSize(bytes) {
+        if (!bytes && bytes !== 0) return "?";
+        var units = ["o", "Ko", "Mo", "Go", "To"];
+        var i = 0;
+        var val = bytes;
+        while (val >= 1024 && i < units.length - 1) {
+          val /= 1024;
+          i++;
+        }
+        return val.toFixed(i === 0 ? 0 : 1) + " " + units[i];
+      }
+
+      function uuid4() {
+        if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
+        return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+          var r = (Math.random() * 16) | 0;
+          var v = c === "x" ? r : (r & 0x3) | 0x8;
+          return v.toString(16);
+        });
+      }
+
+      function progressContainer(input) {
+        return (
+          document.getElementById("upload-progress-container") ||
+          input.closest(".card")
+        );
+      }
+
+      function sleep(ms) {
+        return new Promise(function (resolve) { setTimeout(resolve, ms); });
+      }
+
+      // Envoie un morceau, avec retry + backoff exponentiel en cas
+      // d'erreur réseau, timeout, ou statut HTTP non-2xx (502 inclus).
+      // onProgress(loadedBytesOfThisChunk) est appelé pendant l'envoi
+      // pour permettre une barre de progression fluide, y compris pour
+      // un morceau en cours de retry.
+      function sendChunkWithRetry(url, form, onProgress, isCancelled) {
+        var attempt = 0;
+
+        function attemptOnce() {
+          attempt++;
+          return new Promise(function (resolve, reject) {
+            if (isCancelled()) { reject({ cancelled: true }); return; }
+            var xhr = new XMLHttpRequest();
+            xhr.timeout = 90000; // 90s par morceau : largement suffisant même sur un lien lent, on ne bloque pas indéfiniment sur un morceau mort
+            xhr.upload.addEventListener("progress", function (evt) {
+              onProgress(evt.lengthComputable ? evt.loaded : 0);
+            });
+            xhr.addEventListener("load", function () {
+              if (xhr.status >= 200 && xhr.status < 300) {
+                try {
+                  resolve(JSON.parse(xhr.responseText));
+                } catch (e) {
+                  reject({ message: "réponse serveur invalide" });
+                }
+              } else {
+                reject({ message: "HTTP " + xhr.status, retryable: true });
+              }
+            });
+            xhr.addEventListener("error", function () {
+              reject({ message: "connexion perdue", retryable: true });
+            });
+            xhr.addEventListener("timeout", function () {
+              reject({ message: "délai dépassé", retryable: true });
+            });
+            xhr.addEventListener("abort", function () {
+              reject({ cancelled: true });
+            });
+            xhr.open("POST", url, true);
+            xhr.send(form);
+          });
+        }
+
+        function run() {
+          return attemptOnce().catch(function (err) {
+            if (err.cancelled) throw err;
+            if (attempt >= MAX_ATTEMPTS_PER_CHUNK) {
+              throw { message: (err.message || "échec") + " (après " + attempt + " tentatives)" };
+            }
+            var delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+            onProgress(0); // reset visuel du morceau avant nouvelle tentative
+            return sleep(Math.min(delay, 15000)).then(run);
+          });
+        }
+
+        return run();
+      }
+
+      async function uploadOneFile(url, file, onFileProgress, isCancelled) {
+        var relPath = file.webkitRelativePath || file.name;
+        var uploadId = uuid4();
+        var totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
+        var sentBeforeThisChunk = 0;
+
+        for (var index = 0; index < totalChunks; index++) {
+          var start = index * CHUNK_SIZE;
+          var end = Math.min(file.size, start + CHUNK_SIZE);
+          var blob = file.slice(start, end);
+
+          var form = new FormData();
+          form.append("upload_id", uploadId);
+          form.append("relpath", relPath);
+          form.append("chunk_index", String(index));
+          form.append("total_chunks", String(totalChunks));
+          form.append("total_size", String(file.size));
+          form.append("chunk", blob, "chunk");
+
+          var base = sentBeforeThisChunk;
+          var result = await sendChunkWithRetry(url, form, function (loadedInChunk) {
+            onFileProgress(base + loadedInChunk);
+          }, isCancelled);
+
+          sentBeforeThisChunk += (end - start);
+          onFileProgress(sentBeforeThisChunk);
+
+          if (result.status === "error") {
+            throw { message: result.error || "échec du réassemblage côté serveur" };
+          }
+        }
+      }
+
+      function startUpload(url, files, container) {
+        var totalBytes = 0;
+        for (var i = 0; i < files.length; i++) totalBytes += files[i].size;
+
+        var row = document.createElement("div");
+        row.className = "upload-progress-row";
+        row.innerHTML =
+          '<div class="upload-progress-head">' +
+            '<span class="upload-progress-label">' +
+              "Envoi de " + files.length + " fichier(s) — " + humanSize(totalBytes) +
+            "</span>" +
+            '<span class="upload-progress-pct">0%</span>' +
+          "</div>" +
+          '<div class="upload-progress-bar-outer">' +
+            '<div class="upload-progress-bar-inner"></div>' +
+          "</div>" +
+          '<div class="upload-progress-foot">' +
+            '<span class="upload-progress-detail">démarrage…</span>' +
+            '<span class="upload-progress-actions"></span>' +
+          "</div>";
+        container.prepend(row);
+
+        var bar = row.querySelector(".upload-progress-bar-inner");
+        var pct = row.querySelector(".upload-progress-pct");
+        var detail = row.querySelector(".upload-progress-detail");
+        var actions = row.querySelector(".upload-progress-actions");
+        var head = row.querySelector(".upload-progress-label");
+
+        var startedAt = Date.now();
+        var lastLoaded = 0;
+        var lastTick = startedAt;
+        var speedBps = 0;
+        var cancelled = false;
+        var bytesDoneBeforeCurrentFile = 0;
+
+        function setActions(html) { actions.innerHTML = html; }
+
+        setActions('<button type="button" class="btn btn-sm upload-cancel">Annuler</button>');
+        actions.querySelector(".upload-cancel").addEventListener("click", function () {
+          cancelled = true;
+        });
+
+        function reportProgress(loadedTotal) {
+          var now = Date.now();
+          var elapsedTick = (now - lastTick) / 1000;
+          if (elapsedTick > 0.4) {
+            speedBps = (loadedTotal - lastLoaded) / elapsedTick;
+            lastLoaded = loadedTotal;
+            lastTick = now;
+          }
+          var ratio = totalBytes > 0 ? Math.min(1, loadedTotal / totalBytes) : 0;
+          bar.style.width = (ratio * 100).toFixed(1) + "%";
+          pct.textContent = Math.round(ratio * 100) + "%";
+          var remaining = speedBps > 0 ? (totalBytes - loadedTotal) / speedBps : null;
+          detail.textContent =
+            humanSize(loadedTotal) + " / " + humanSize(totalBytes) +
+            (speedBps > 0 ? "  ·  " + humanSize(speedBps) + "/s" : "") +
+            (remaining !== null && isFinite(remaining) && remaining > 0
+              ? "  ·  ~" + Math.ceil(remaining) + "s restantes" : "");
+        }
+
+        function refreshStatusWrapper() {
+          var statusWrapper = document.getElementById("upload-status-wrapper");
+          if (statusWrapper && window.htmx) {
+            window.htmx.ajax("GET", statusWrapper.getAttribute("data-status-url"), {
+              target: "#upload-status-wrapper",
+              swap: "outerHTML",
+            });
+          }
+        }
+
+        function failRow(reason, remainingFiles) {
+          row.classList.add("upload-error");
+          detail.textContent = "échec : " + reason;
+          setActions('<button type="button" class="btn btn-sm btn-danger upload-retry">Réessayer</button>');
+          actions.querySelector(".upload-retry").addEventListener("click", function () {
+            row.remove();
+            startUpload(url, remainingFiles, container);
+          });
+        }
+
+        (async function run() {
+          try {
+            for (var i = 0; i < files.length; i++) {
+              var file = files[i];
+              await uploadOneFile(url, file, function (loadedInFile) {
+                reportProgress(bytesDoneBeforeCurrentFile + loadedInFile);
+              }, function () { return cancelled; });
+              bytesDoneBeforeCurrentFile += file.size;
+              // Fichier arrivé côté serveur, mais sa classification en
+              // acquisition se fait au prochain tick de l'orchestrateur
+              // (jusqu'à 10s plus tard) — pas au moment de cette réponse.
+              // On rafraîchit le wrapper après chaque fichier plutôt qu'à
+              // la toute fin du lot : ça (ré)arme le polling dès que
+              // possible, y compris si le lot restant échoue ensuite.
+              refreshStatusWrapper();
+            }
+
+            row.classList.add("upload-done");
+            bar.style.width = "100%";
+            pct.textContent = "100%";
+            var totalSeconds = Math.max(1, (Date.now() - startedAt) / 1000);
+            detail.textContent =
+              "terminé en " + totalSeconds.toFixed(1) + "s — " +
+              humanSize(totalBytes / totalSeconds) + "/s en moyenne";
+            setActions("");
+            setTimeout(function () {
+              row.style.opacity = "0";
+              setTimeout(function () { row.remove(); }, 400);
+            }, 4000);
+          } catch (err) {
+            if (cancelled) {
+              failRow("annulé", files.slice(i));
+            } else {
+              failRow(err.message || "erreur inconnue", files.slice(i));
+            }
+          }
+        })();
+      }
+
+      document.addEventListener("change", function (evt) {
+        var input = evt.target;
+        if (!input || !input.matches || !input.matches(".js-acquisition-upload")) {
+          return;
+        }
+        if (!input.files || input.files.length === 0) return;
+        var url = input.getAttribute("data-upload-url");
+        if (!url) return;
+
+        // Copie en tableau réel : input.files (FileList) serait vidé par
+        // input.value = "" ci-dessous, avant même que l'upload démarre.
+        var files = Array.prototype.slice.call(input.files);
+        startUpload(url, files, progressContainer(input));
+
+        input.value = "";
+      });
+    })();
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <a href="/" class="brand">
+      <img src="/static/images/logo.png" alt="">
+      <span class="brand-name">DFIR <em>Duck</em></span>
+    </a>
+    {% block topnav %}{% endblock %}
+    <div class="topbar-end">
+      {% block topbar_end %}{% endblock %}
+    </div>
+  </header>
+
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site-footer">
+    <span>
+      DFIR-DUCK &middot; Beta 0.1 &middot;
+      <a href="https://github.com/T-Godard/DFIR-DUCK/blob/main/LICENSE">licence Apache 2.0</a>
+      &middot; Titouan GODARD
+    </span>
+    <a href="https://github.com/T-Godard/DFIR-DUCK">github.com/T-Godard/DFIR-DUCK</a>
+  </footer>
+
+  {# Point de montage de la fenetre de log (vide = fermee). #}
+  <div id="run-log"></div>
+  <script>
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") {
+        var rl = document.getElementById("run-log");
+        if (rl && rl.innerHTML) rl.innerHTML = "";
+      }
+    });
+
+    // Fenêtre de log : le sondage htmx remplace tout le panneau toutes les 3 s.
+    // Sans mémoire du défilement, chaque rafraîchissement ramenait la vue en
+    // bas du fichier — impossible de remonter lire quoi que ce soit.
+    //
+    // On reprend le comportement d'un `tail -f` : on reste collé au bas tant
+    // que l'utilisateur y est, et dès qu'il remonte on lui rend la main, en
+    // signalant les nouvelles lignes plutôt qu'en le ramenant de force.
+    (function () {
+      var STICK_SLACK = 24;   // px : marge sous laquelle on considère être « en bas »
+      var before = null;
+
+      function pane() { return document.querySelector("#run-log pre.run-log"); }
+      function isLogSwap(evt) {
+        var t = evt.target || (evt.detail && evt.detail.target);
+        return t && t.id === "run-log";
+      }
+      function atBottom(el) {
+        return el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_SLACK;
+      }
+
+      document.body.addEventListener("htmx:beforeSwap", function (evt) {
+        if (!isLogSwap(evt)) return;
+        var el = pane();
+        // Panneau absent = première ouverture : `before` reste nul, on ira en bas.
+        before = el && { top: el.scrollTop, text: el.textContent, stuck: atBottom(el) };
+      });
+
+      document.body.addEventListener("htmx:afterSwap", function (evt) {
+        if (!isLogSwap(evt)) return;
+        var el = pane();
+        if (!el) { before = null; return; }
+        if (!before || before.stuck) { el.scrollTop = el.scrollHeight; return; }
+
+        // Le serveur ne renvoie que les N dernières lignes : ce qui s'ajoute en
+        // bas disparaît en haut. Garder le même scrollTop ferait donc défiler le
+        // texte sous les yeux du lecteur ; on décale d'autant pour rester sur
+        // les mêmes lignes.
+        el.scrollTop = before.top - dropped(before.text, el.textContent) * lineHeight(el);
+        if (el.textContent !== before.text) showNewLines(el);
+      });
+
+      function lineHeight(el) {
+        return parseFloat(getComputedStyle(el).lineHeight) || 16;
+      }
+
+      // Nombre de lignes sorties par le haut entre deux tirages de la fenêtre :
+      // on cherche le début du nouveau texte dans l'ancien.
+      function dropped(oldText, newText) {
+        if (!oldText || oldText === newText) return 0;
+        var at = oldText.indexOf(newText.slice(0, 300));
+        // -1 : trop de lignes d'un coup pour recaler. 0 : rien n'est sorti.
+        if (at <= 0) return 0;
+        return (oldText.slice(0, at).match(/\n/g) || []).length;
+      }
+
+      function showNewLines(el) {
+        var body = el.parentNode;
+        if (!body || body.querySelector(".log-jump")) return;
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "log-jump";
+        btn.textContent = "nouvelles lignes ↓";
+        btn.addEventListener("click", function () {
+          el.scrollTop = el.scrollHeight;
+          btn.remove();
+        });
+        // Retiré dès que l'utilisateur redescend de lui-même.
+        el.addEventListener("scroll", function onScroll() {
+          if (!atBottom(el)) return;
+          btn.remove();
+          el.removeEventListener("scroll", onScroll);
+        });
+        // Dans le flux, juste sous le log : pas de positionnement absolu à
+        // recaler sur la hauteur variable du pied de panneau.
+        el.insertAdjacentElement("afterend", btn);
+      }
+    })();
+  </script>
+</body>
+</html>

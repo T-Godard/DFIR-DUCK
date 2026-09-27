@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+
+{% block topnav %}
+  {# `aria-owns` : le bouton Paramètres est rendu à l'autre bout de l'en-tête,
+     mais il appartient logiquement à cette liste d'onglets. #}
+  <nav class="topnav" role="tablist" aria-owns="settings-tab-btn">
+    <button type="button" class="tab-btn active" data-tab="overview" role="tab" aria-selected="true">Vue d'ensemble</button>
+    <button type="button" class="tab-btn" data-tab="acquisitions" role="tab" aria-selected="false">Acquisitions</button>
+    <button type="button" class="tab-btn" data-tab="extraction" role="tab" aria-selected="false">Extraction</button>
+  </nav>
+{% endblock %}
+
+{% block topbar_end %}
+  {% include "partials/_state_pill.html" %}
+  {% include "partials/_settings_tab_button.html" %}
+{% endblock %}
+
+{% block content %}
+
+<div class="tab-panel" id="tab-overview" data-tab-panel="overview">
+  <div class="page-head">
+    <div>
+      <h1 class="page-title">Vue d'ensemble</h1>
+      <p class="page-sub">État des acquisitions en cours de traitement et charge du conteneur.</p>
+    </div>
+    {% with initial = true %}{% include "partials/header_status.html" %}{% endwith %}
+  </div>
+
+  {% include "partials/_perf_widget.html" %}
+  {% include "partials/overview_status.html" %}
+</div>
+
+<div class="tab-panel hidden" id="tab-acquisitions" data-tab-panel="acquisitions">
+  <div class="page-head">
+    <div>
+      <h1 class="page-title">Acquisitions</h1>
+      <p class="page-sub">Une acquisition = un <code>Outcome.json</code> DFIR-ORC et la suite d'archives <code>.7z</code> qu'il référence.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2 class="card-title">{{ "Déposer une acquisition" if uploads_enabled else "Acquisitions déposées" }}</h2>
+      <span class="card-note">Le nom affiché est repris du champ <code>computer_name</code> de l'Outcome.json</span>
+    </div>
+    {% if uploads_enabled %}
+      <div class="upload-actions">
+        <label class="dropzone-label">
+          Fichiers
+          <input type="file" multiple class="js-acquisition-upload visually-hidden"
+                 data-upload-url="/investigations/{{ inv.id }}/upload/chunk">
+        </label>
+        <label class="dropzone-label">
+          Répertoire complet
+          <input type="file" multiple webkitdirectory class="js-acquisition-upload visually-hidden"
+                 data-upload-url="/investigations/{{ inv.id }}/upload/chunk">
+        </label>
+      </div>
+      <div id="upload-progress-container"></div>
+    {% else %}
+      <div class="empty">
+        Le dépôt depuis l'interface web est désactivé (<code>WEB_UPLOADS_ENABLED=false</code>).
+        Les acquisitions copiées dans <code>data/uploads/_pending/</code> restent traitées normalement.
+      </div>
+    {% endif %}
+    {% include "partials/upload_status.html" %}
+  </div>
+</div>
+
+<div class="tab-panel hidden" id="tab-extraction" data-tab-panel="extraction">
+  <div class="page-head">
+    <div>
+      <h1 class="page-title">Extraction</h1>
+      <p class="page-sub">Une exécution par outil et par acquisition. OGRE et EVTX démarrent dès que les archives sont complètes ; les détecteurs dès qu'EVTX a réussi.</p>
+    </div>
+  </div>
+  {% include "partials/runs_status.html" %}
+</div>
+
+<div class="tab-panel hidden" id="tab-settings" data-tab-panel="settings">
+  <div class="page-head">
+    <div>
+      <h1 class="page-title">Paramètres</h1>
+      <p class="page-sub">Ce que l'instance a le droit de lancer. Chaque changement s'applique tout de suite et survit aux redémarrages ; la configuration livrée sert de point de départ.</p>
+    </div>
+  </div>
+
+  {% include "partials/settings_tools.html" %}
+  {% include "partials/_settings_status.html" %}
+</div>
+
+<script>
+  (function () {
+    var buttons = document.querySelectorAll(".tab-btn");
+    var panels = document.querySelectorAll(".tab-panel");
+
+    function refreshStatusPanels(panel) {
+      if (!window.htmx) return;
+      panel.querySelectorAll("[data-status-url]").forEach(function (el) {
+        window.htmx.ajax("GET", el.getAttribute("data-status-url"), {
+          target: "#" + el.id,
+          swap: "outerHTML",
+        });
+      });
+    }
+
+    function activate(tabName) {
+      buttons.forEach(function (btn) {
+        var isActive = btn.getAttribute("data-tab") === tabName;
+        btn.classList.toggle("active", isActive);
+        btn.setAttribute("aria-selected", isActive ? "true" : "false");
+      });
+      panels.forEach(function (panel) {
+        var isActive = panel.getAttribute("data-tab-panel") === tabName;
+        panel.classList.toggle("hidden", !isActive);
+        if (isActive) {
+          refreshStatusPanels(panel);
+          if (tabName === "overview" && window.__dfirPerfRefresh) {
+            window.__dfirPerfRefresh();
+          }
+        }
+      });
+      if (history.replaceState) {
+        history.replaceState(null, "", "#" + tabName);
+      }
+    }
+
+    buttons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        activate(btn.getAttribute("data-tab"));
+      });
+    });
+
+    var initial = (window.location.hash || "").replace("#tab-", "").replace("#", "");
+    var hasInitial = Array.prototype.some.call(buttons, function (b) {
+      return b.getAttribute("data-tab") === initial;
+    });
+    activate(hasInitial ? initial : "overview");
+  })();
+</script>
+{% endblock %}

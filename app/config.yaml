@@ -1,0 +1,104 @@
+# ============================================================
+#  DFIR-DUCK — configuration de l'application
+# ============================================================
+#
+# Lu par app/config.py. Priorité (du plus fort au plus faible) :
+#   1. variables d'environnement du process ;
+#   2. fichier .env (docker compose l'injecte via `env_file`, et il est aussi
+#      lu directement en dev local) ;
+#   3. ce fichier ;
+#   4. valeurs par défaut du code (app/config.py).
+#
+# Surcharger une clé sans toucher à ce fichier : ajouter son nom EN MAJUSCULES
+# dans le .env (ex. `MAX_CONCURRENT_RUNS=1`).
+#
+# Les chemins des outils embarqués (/opt/tools/...) ne figurent pas ici : ils
+# dépendent du Dockerfile, pas de l'exploitation. Ils restent surchargeables de
+# la même façon (ex. `HAYABUSA_BIN=/chemin/hayabusa`).
+
+# --- Emplacement des données -------------------------------------------------
+# Tout vit sous `data_dir` (DATA_DIR) par défaut. Ces deux clés déplacent
+# ailleurs les dossiers lourds, pour un déploiement sur une infra partagée :
+# le pool d'arrivée des collectes et les sorties d'outils. Vides = sous
+# data_dir. En Docker, voir aussi DFIR_PENDING_DIRECTORY / DFIR_OUTPUT_DIRECTORY
+# dans le .env, qui montent ces dossiers depuis l'hôte.
+pending_dir: ""
+output_dir: ""
+
+# Consommation du pool d'arrivée :
+#   move — les fichiers y sont déplacés, le pool se vide (défaut) ;
+#   copy — ils sont copiés et RIEN n'est supprimé : le pool appartient à un
+#          autre service (partage SMB alimenté par un serveur d'upload). Ce qui
+#          a déjà été pris est mémorisé dans data/pending_consumed.json.
+pending_consume: move
+# Durée pendant laquelle un fichier du pool doit rester inchangé avant d'être
+# pris — protège des copies en cours, qui n'ont pas le suffixe `.part-` des
+# uploads de l'application. Vide = 15 s en mode `copy`, 0 en mode `move`.
+pending_stable_seconds:
+
+# --- Traitements activés -------------------------------------------------------
+# Quels outils l'orchestrateur a le droit de lancer. Cette liste est la
+# pré-configuration livrée ; l'onglet Paramètres la surcharge et persiste le
+# choix dans data/preferences.json (supprimer ce fichier revient ici).
+#
+# Un outil désactivé ne démarre ni tout seul ni par « Forcer », et ne retient
+# pas la suite : les autres avancent, et l'onglet Extraction montre ce qui
+# manque. Un outil absent de la liste est considéré activé, pour qu'un
+# traitement ajouté plus tard fonctionne sans y toucher.
+# Les traitements sont nommés par famille d'artefacts : ce qui sort l'artefact
+# des archives, puis ce qui l'analyse.
+tools_enabled:
+  dfir-ogre: true        # extraction et normalisation des artefacts
+  evtx-extract: true     # journaux Windows tirés des archives
+  evtx-chainsaw: true    # détection Sigma sur les journaux
+  evtx-hayabusa: true    # détection Sigma sur les journaux
+  evtx-zircolite: true   # détection Sigma sur les journaux
+  mft-extract: true      # MFT tirée des archives (absente de la sortie OGRE)
+  mft-chainsaw: true     # règles natives Chainsaw sur la MFT
+  registry-extract: true # ruches tirées des archives (OGRE n'en sort que des vues)
+  registry-chainsaw: true # shimcache (AppCompatCache) analysé par Chainsaw
+
+# --- Dépôt d'acquisitions via l'interface web ------------------------------
+# À false, les boutons de dépôt disparaissent et les routes d'upload répondent
+# 403 ; les fichiers copiés à la main dans data/uploads/_pending/ restent
+# traités normalement.
+web_uploads_enabled: true
+
+# --- Logging -----------------------------------------------------------------
+log_level: INFO
+log_max_bytes: 20971520       # 20 Mo par fichier (app.log / app.jsonl)
+log_backup_count: 10
+
+# --- Orchestrateur -----------------------------------------------------------
+orchestrator_tick_seconds: 5
+
+# --- Runs d'extraction (OGRE, EVTX, Chainsaw, Hayabusa, Zircolite) ------------
+# Runs simultanés. Une acquisition complète déclenche jusqu'à 5 runs.
+max_concurrent_runs: 4
+# Au-delà, un run est tué (SIGTERM puis SIGKILL) et marqué "failed".
+run_timeout_seconds: 86400
+# Limite d'adresse virtuelle par run (Mo) via RLIMIT_AS. 0 = désactivé : la
+# vraie limite est alors `mem_limit` du conteneur.
+run_memory_limit_mb: 0
+# Politesse d'ordonnancement des sous-processus (0 = normal, 19 = max).
+run_nice: 10
+# Cœurs CPU max par run (affinité). 0 = tous. Un run bridé à N cœurs ne peut
+# pas dépasser N x 100 % de CPU. Linux uniquement.
+run_cpu_cores: 0
+# Garde-fou anti-emballement : temps CPU total (s) avant kill du run. 0 = off.
+run_cpu_seconds: 0
+# Intervalle d'échantillonnage CPU/RAM des runs en cours (s). 0 = pas de suivi.
+run_metrics_interval_seconds: 1
+
+# --- Historique de performance (graphique de l'onglet Vue d'ensemble) --------
+resource_sample_interval_seconds: 10
+# Rétention en jours (data/logs/resources.jsonl), plafonnée à 7.
+resource_history_days: 7
+# Cadence de la carte « Ressources du conteneur » en mode instantané (ms).
+resource_refresh_ms: 1000
+# Fenêtre minimale de mesure des taux (CPU du conteneur, débit réseau), en
+# secondes. Les taux sont des dérivées de compteurs noyau : mesurés sur une
+# fenêtre trop courte, ils dépassent le plafond (1000 % lus sur 8 cœurs).
+# Garder cette valeur sous `resource_refresh_ms` : l'affichage peut aller plus
+# vite que la mesure, les lectures intermédiaires reçoivent la dernière valeur.
+resource_rate_window_seconds: 0.75

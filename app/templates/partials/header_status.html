@@ -1,0 +1,17 @@
+{# Chiffres de tete + pastille d'état (OOB) : un seul poll pour les deux.
+   Volumétries par outil (journaux, détections, documents) : onglets dédiés. #}
+<div id="kpi-strip" class="kpis"
+     hx-get="/investigations/{{ inv.id }}/header/status"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML"
+     hx-sync="this:drop">
+  <div class="kpi">
+    <div class="kpi-value">{{ headline.machines | fr_int }}</div>
+    <div class="kpi-label">machine{{ "s" if headline.machines > 1 }}</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">{{ headline.runs_done | fr_int }}<small> / {{ headline.runs_total | fr_int }}</small></div>
+    <div class="kpi-label">traitements finis</div>
+  </div>
+</div>
+{% if not initial %}{% with oob = true %}{% include "partials/_state_pill.html" %}{% endwith %}{% endif %}

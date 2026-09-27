@@ -1,0 +1,46 @@
+{% if not inv.acquisitions %}
+  <div class="empty">
+    Aucune acquisition pour le moment. Déposez un <code>Outcome.json</code> et ses archives
+    depuis l'onglet Acquisitions.
+  </div>
+{% else %}
+  {% for acq in inv.acquisitions.values() | sort(attribute="created_at") %}
+    {% set f = facts_by_acq.get(acq.id, {}) %}
+    {% set st = upload_status.per_acquisition.get(acq.id, {"missing": [], "complete": False}) %}
+    {# Le contour rouge vient de `failed_phase`, comme le texte « Échec à
+       l'étape X » juste en dessous : une seule source. #}
+    <article class="machine {% if f.running %}is-running{% elif f.failed_phase %}is-failed{% endif %}">
+      <header class="machine-head">
+        <div class="machine-id">
+          <span class="machine-name">{{ acq.name }}</span>
+          {% if not acq.outcome_filename %}
+            <span class="chip">en attente de l Outcome.json</span>
+          {% elif st.missing %}
+            <span class="chip">{{ st.missing | length }} archive{{ "s" if st.missing | length > 1 }} manquante{{ "s" if st.missing | length > 1 }}</span>
+          {% endif %}
+        </div>
+        <div class="machine-meta">
+          {% if f.collect_bytes %}<span>Collecte <b>{{ f.collect_bytes | human_bytes }}</b></span>{% endif %}
+          <span>Reçue <b>{{ f.received_at | relative_datetime }}</b></span>
+          {% if f.failed_phase %}
+            <span class="is-err">Échec à l'étape <b>{{ f.failed_phase }}</b></span>
+          {% elif f.duration_seconds %}
+            <span>Traitée en <b>{{ f.duration_seconds | human_duration }}</b></span>
+          {% endif %}
+        </div>
+      </header>
+
+      {# Les étapes, sans chiffres : le détail outil par outil (détections,
+         journaux) est dans l'onglet Extraction. #}
+      <div class="pipeline" style="--steps: {{ f.phases | length }}">
+        {% for phase in f.phases %}
+          <div class="step is-{{ phase.state }}">
+            <div class="step-name">{{ phase.label }}</div>
+            <div class="step-state">{{ phase_state_labels.get(phase.state, phase.state) }}</div>
+            <div class="step-rule"></div>
+          </div>
+        {% endfor %}
+      </div>
+    </article>
+  {% endfor %}
+{% endif %}

@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "B008",  # Depends()/Form()/File() en valeur par défaut : idiome FastAPI
+]
+
+[tool.ruff.lint.per-file-ignores]
+"app/upload/service.py" = ["BLE001"]

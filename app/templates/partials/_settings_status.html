@@ -1,0 +1,5 @@
+{# Accusé de réception de l'onglet Paramètres (hors cible quand `oob`). #}
+<div id="settings-status" aria-live="polite" {% if oob %}hx-swap-oob="true"{% endif %}>
+  {% if error %}<p class="ai-settings-msg error">{{ error }}</p>{% endif %}
+  {% if message %}<p class="ai-settings-msg ok">{{ message }}</p>{% endif %}
+</div>

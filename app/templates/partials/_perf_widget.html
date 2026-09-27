@@ -1,0 +1,402 @@
+{# Hors du wrapper htmx pollé : sinon le mode choisi serait perdu à chaque
+   swap 3 s. Le widget se rafraîchit lui-même (fetch + redraw).
+
+   Deux modes : « instantané » (jauges horizontales, valeurs courantes) et les
+   plages d'historique (courbes CPU / mémoire / espace disponible). Chaque
+   mesure porte les deux rendus, seul l'un des deux est visible. #}
+<section class="card" id="perf-widget"
+         data-history-url="/investigations/{{ inv.id }}/resources/history"
+         data-refresh-ms="{{ resource_refresh_ms }}">
+  <div class="card-head">
+    <h2 class="card-title">Ressources du conteneur</h2>
+  </div>
+
+  <div class="range-tabs">
+    <button type="button" class="range-btn active" data-range="now">Instantané</button>
+    <button type="button" class="range-btn" data-range="6h">6 h</button>
+    <button type="button" class="range-btn" data-range="24h">24 h</button>
+    <button type="button" class="range-btn" data-range="7j">7 j</button>
+  </div>
+
+  <div class="meters">
+    <div class="meter">
+      <div class="meter-head">
+        <span class="meter-name">Processeur</span>
+        <span class="meter-value" data-slot="cpu">&mdash;</span>
+      </div>
+      <p class="meter-sub" data-slot="cpu-sub"></p>
+      <div class="bar" data-slot="cpu-gauge"><div class="bar-fill" data-slot="cpu-bar" style="width:0"></div></div>
+      <canvas class="spark hidden" data-slot="cpu-chart"></canvas>
+      <div class="meter-foot">
+        <span data-slot="cpu-foot-left"></span>
+        <span data-slot="cpu-foot-right"></span>
+      </div>
+    </div>
+
+    <div class="meter">
+      <div class="meter-head">
+        <span class="meter-name">Mémoire</span>
+        <span class="meter-value" data-slot="mem">&mdash;</span>
+      </div>
+      <p class="meter-sub" data-slot="mem-sub"></p>
+      <div class="bar" data-slot="mem-gauge"><div class="bar-fill" data-slot="mem-bar" style="width:0"></div></div>
+      <canvas class="spark hidden" data-slot="mem-chart"></canvas>
+      <div class="meter-foot">
+        <span data-slot="mem-foot-left"></span>
+        <span data-slot="mem-foot-right"></span>
+      </div>
+    </div>
+
+    <div class="meter">
+      <div class="meter-head">
+        <span class="meter-name" data-slot="net-name">Réseau</span>
+        <span class="meter-value" data-slot="net">&mdash;</span>
+      </div>
+      <p class="meter-sub" data-slot="net-sub"></p>
+      <div class="bar" data-slot="net-gauge"><div class="bar-fill" data-slot="net-bar" style="width:0"></div></div>
+      <canvas class="spark hidden" data-slot="net-chart"></canvas>
+      <div class="meter-foot">
+        <span data-slot="net-foot-left"></span>
+        <span data-slot="net-foot-right"></span>
+      </div>
+    </div>
+
+    <div class="meter">
+      <div class="meter-head">
+        <span class="meter-name" data-slot="disk-name">Stockage</span>
+        <span class="meter-value" data-slot="disk">&mdash;</span>
+      </div>
+      <p class="meter-sub" data-slot="disk-sub"></p>
+      <div class="bar" data-slot="disk-gauge"><div class="bar-fill" data-slot="disk-bar" style="width:0"></div></div>
+      <canvas class="spark hidden" data-slot="disk-chart"></canvas>
+      <div class="meter-foot">
+        <span data-slot="disk-foot-left"></span>
+        <span data-slot="disk-foot-right"></span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+  (function () {
+    var root = document.getElementById("perf-widget");
+    if (!root || root.dataset.wired) return;
+    root.dataset.wired = "1";
+
+    var url = root.getAttribute("data-history-url");
+    var buttons = root.querySelectorAll(".range-btn");
+    var range = "now";
+    var timer = null;
+    var NBSP = " ";
+    // Un débit réseau n'a pas de plafond connu (contrairement aux cœurs, à la
+    // RAM ou à un volume) : la jauge se lit donc relativement au plus haut
+    // débit observé depuis l'ouverture de la page.
+    var netPeak = 0;
+
+    // Instantané : cadence réglée par `resource_refresh_ms` (1 s par défaut).
+    // Les taux sont mesurés sur une fenêtre garantie côté serveur, donc
+    // rafraîchir vite donne des valeurs plus fraîches sans les fausser.
+    // Historique : la courbe bouge à la vitesse de l'échantillonnage (60 s).
+    var REFRESH_MS = {
+      now: parseInt(root.getAttribute("data-refresh-ms"), 10) || 1000,
+      history: 30000
+    };
+
+    // Une requête à la fois : si le serveur met plus longtemps qu'un tick à
+    // répondre, les suivants sont sautés plutôt qu'empilés.
+    var inFlight = false;
+
+    function slot(name) { return root.querySelector('[data-slot="' + name + '"]'); }
+    function set(name, text) { var el = slot(name); if (el) el.textContent = text; }
+    function show(name, visible) {
+      var el = slot(name);
+      if (el) el.classList.toggle("hidden", !visible);
+    }
+
+    function fmtBytes(n) {
+      if (!n && n !== 0) return "—";
+      var units = ["o", "Ko", "Mo", "Go", "To", "Po"], i = 0, v = n;
+      while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+      var s = i === 0 ? v.toFixed(0) : v.toFixed(1);
+      return s.replace(".", ",") + NBSP + units[i];
+    }
+    function fmtPct(v) {
+      return Math.round(v).toString().replace(/\B(?=(\d{3})+(?!\d))/g, NBSP) + NBSP + "%";
+    }
+    function fmtRate(bps) {
+      if (bps === null || bps === undefined) return "—";
+      return fmtBytes(bps) + "/s";
+    }
+
+    var RANGE_LABEL = { "6h": "il y a 6 h", "24h": "il y a 24 h", "7j": "il y a 7 j" };
+
+    // Un canvas n'hérite pas des variables CSS : on lit la palette du thème une
+    // fois, pour que les courbes suivent `style.css` et pas une copie figée.
+    var THEME = getComputedStyle(document.documentElement);
+    function token(name, fallback) {
+      return (THEME.getPropertyValue(name) || "").trim() || fallback;
+    }
+    var CURVE = token("--info", "#3daee9");
+    var CURVE_AREA = token("--info-area", "rgba(61,174,233,.22)");
+    var CURVE_EMPTY = token("--text-faint", "#8a949c");
+
+    function fmtDuration(sec) {
+      if (sec < 90) return Math.round(sec) + NBSP + "s";
+      if (sec < 5400) return Math.round(sec / 60) + NBSP + "min";
+      if (sec < 172800) return Math.round(sec / 3600) + NBSP + "h";
+      return Math.round(sec / 86400) + NBSP + "j";
+    }
+
+    // Dit à l'utilisateur ce que la courbe couvre réellement quand elle ne
+    // couvre pas toute la plage : sans ça, un conteneur démarré il y a dix
+    // minutes semble avoir tourné pendant sept jours.
+    function historyNote(series, t0, t1) {
+      if (!series.length) return "";
+      var have = t1 - series[0].x;
+      if (have >= (t1 - t0) * 0.95) return "";
+      return fmtDuration(Math.max(have, 1)) + " d'historique seulement";
+    }
+
+    // Découpe la série sur ses trous, pour ne pas relier d'un trait deux
+    // mesures séparées par une coupure. Le pas dépend de la plage (l'API
+    // moyenne par paquets), on le déduit donc des points eux-mêmes.
+    function splitSegments(points) {
+      if (points.length < 2) return [points];
+      var steps = [];
+      for (var i = 1; i < points.length; i++) steps.push(points[i].x - points[i - 1].x);
+      steps.sort(function (a, b) { return a - b; });
+      var limit = Math.max(steps[Math.floor(steps.length / 2)] * 4, 1);
+      var segs = [[points[0]]];
+      for (var j = 1; j < points.length; j++) {
+        if (points[j].x - points[j - 1].x > limit) segs.push([]);
+        segs[segs.length - 1].push(points[j]);
+      }
+      return segs;
+    }
+
+    // Aire + ligne sur un axe temporel imposé [t0, t1] : les périodes sans
+    // mesure restent vides au lieu d'être absorbées par un étirement de
+    // l'échelle. `floor` cale le bas de l'échelle : pour l'espace disponible,
+    // partir de zéro écraserait la courbe sur quelques Go de variation.
+    function drawSpark(canvas, points, stroke, fill, floorAtZero, t0, t1) {
+      if (!canvas) return;
+      var ctx = canvas.getContext("2d");
+      var dpr = window.devicePixelRatio || 1;
+      var w = canvas.clientWidth || 600, h = canvas.clientHeight || 48;
+      canvas.width = w * dpr; canvas.height = h * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      if (!points.length) {
+        ctx.fillStyle = CURVE_EMPTY;
+        ctx.font = "12px system-ui, sans-serif";
+        ctx.fillText("pas encore de données", 0, h / 2);
+        return;
+      }
+      var max = 0, min = Infinity;
+      for (var i = 0; i < points.length; i++) {
+        max = Math.max(max, points[i].y);
+        min = Math.min(min, points[i].y);
+      }
+      var top, bottom;
+      if (floorAtZero) {
+        bottom = 0;
+        top = max > 0 ? max * 1.25 : 1;
+      } else {
+        var margin = Math.max((max - min) * 0.35, max * 0.02, 1);
+        bottom = Math.max(0, min - margin);
+        top = max + margin;
+      }
+      var span = Math.max(1, t1 - t0), pad = 3;
+      function X(t) { return 1 + (w - 2) * Math.max(0, Math.min(1, (t - t0) / span)); }
+      function Y(v) {
+        var r = (v - bottom) / Math.max(1e-9, top - bottom);
+        return h - pad - (h - 2 * pad) * Math.max(0, Math.min(1, r));
+      }
+
+      var grad = ctx.createLinearGradient(0, 0, 0, h);
+      grad.addColorStop(0, fill); grad.addColorStop(1, "rgba(0,0,0,0)");
+
+      splitSegments(points).forEach(function (seg) {
+        // Mesure isolée : un point, sinon elle serait invisible.
+        if (seg.length < 2) {
+          ctx.beginPath();
+          ctx.arc(X(seg[0].x), Y(seg[0].y), 1.6, 0, 2 * Math.PI);
+          ctx.fillStyle = stroke; ctx.fill();
+          return;
+        }
+        function trace() {
+          seg.forEach(function (p, i) { i ? ctx.lineTo(X(p.x), Y(p.y)) : ctx.moveTo(X(p.x), Y(p.y)); });
+        }
+        ctx.beginPath();
+        trace();
+        ctx.lineTo(X(seg[seg.length - 1].x), h); ctx.lineTo(X(seg[0].x), h); ctx.closePath();
+        ctx.fillStyle = grad; ctx.fill();
+
+        ctx.beginPath();
+        trace();
+        ctx.strokeStyle = stroke; ctx.lineWidth = 1.5;
+        ctx.lineJoin = "round"; ctx.stroke();
+      });
+    }
+
+    function paintBar(name, used, total) {
+      var bar = slot(name + "-bar");
+      var ratio = (total && used !== null && used !== undefined) ? used / total : 0;
+      if (bar) {
+        bar.style.width = Math.max(0, Math.min(100, ratio * 100)) + "%";
+        bar.classList.toggle("is-warn", ratio >= .75 && ratio < .9);
+        bar.classList.toggle("is-err", ratio >= .9);
+      }
+      return ratio;
+    }
+
+    // Bascule jauge <-> courbe pour une mesure donnée.
+    function mode(name, isHistory) {
+      show(name + "-gauge", !isHistory);
+      show(name + "-chart", isHistory);
+    }
+
+
+    function refresh() {
+      if (inFlight) return;
+      inFlight = true;
+      fetch(url + "?range=" + encodeURIComponent(range))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          var pts = d.points || [], cur = d.current || {}, disk = d.storage || {};
+          var isHistory = d.range !== "now";
+          var from = RANGE_LABEL[d.range] || "";
+          var t1 = d.to_ts || Math.round(Date.now() / 1000);
+          var t0 = d.from_ts || t1;
+
+          // --- Processeur : % du plafond alloué au conteneur ------------------
+          var cpuMax = (cur.cpu_limit_cores || cur.cpu_count || 1) * 100;
+          set("cpu", fmtPct(cur.cpu_percent || 0));
+          mode("cpu", isHistory);
+          if (isHistory) {
+            var cpuSeries = pts.map(function (p) { return { x: p.ts, y: p.cpu_percent || 0 }; });
+            set("cpu-sub", historyNote(cpuSeries, t0, t1));
+            set("cpu-foot-left", from);
+            set("cpu-foot-right", "maintenant");
+            drawSpark(slot("cpu-chart"), cpuSeries, CURVE, CURVE_AREA, true, t0, t1);
+          } else {
+            paintBar("cpu", cur.cpu_percent || 0, cpuMax);
+            var usedCores = (cur.cpu_percent || 0) / 100;
+            set("cpu-sub", usedCores.toFixed(1).replace(".", ",") + " cœur"
+              + (usedCores >= 2 ? "s" : "") + " sur " + (cpuMax / 100) + " alloués");
+            set("cpu-foot-left", fmtPct(cur.cpu_percent || 0) + " utilisés");
+            set("cpu-foot-right", fmtPct(cpuMax));
+          }
+
+          // --- Mémoire -------------------------------------------------------
+          set("mem", fmtBytes(cur.mem_used_bytes));
+          mode("mem", isHistory);
+          if (isHistory) {
+            var memSeries = pts.map(function (p) { return { x: p.ts, y: p.mem_used_bytes || 0 }; });
+            set("mem-sub", historyNote(memSeries, t0, t1));
+            set("mem-foot-left", from);
+            set("mem-foot-right", "maintenant");
+            drawSpark(slot("mem-chart"), memSeries, CURVE, CURVE_AREA, true, t0, t1);
+          } else {
+            var memRatio = paintBar("mem", cur.mem_used_bytes, cur.mem_limit_bytes);
+            set("mem-sub", cur.mem_limit_bytes
+              ? (fmtPct(memRatio * 100) + " de " + fmtBytes(cur.mem_limit_bytes) + " alloués")
+              : "");
+            set("mem-foot-left", fmtBytes(cur.mem_used_bytes) + " utilisés");
+            set("mem-foot-right", fmtBytes(cur.mem_limit_bytes));
+          }
+
+          // --- Réseau : volumétrie du conteneur, hors boucle locale ----------
+          var recv = cur.net_recv_bps, sent = cur.net_sent_bps;
+          var rated = recv !== null && recv !== undefined;
+          var netTotal = (recv || 0) + (sent || 0);
+          netPeak = Math.max(netPeak, netTotal);
+          set("net", rated ? fmtRate(netTotal) : "—");
+          mode("net", isHistory);
+          if (isHistory) {
+            // Les échantillons antérieurs à la mesure réseau sont écartés, pas
+            // ramenés à zéro : le trou se voit, il ne se lit pas « aucun trafic ».
+            var netSeries = pts
+              .filter(function (p) { return p.net_recv_bps !== null && p.net_recv_bps !== undefined; })
+              .map(function (p) { return { x: p.ts, y: (p.net_recv_bps || 0) + (p.net_sent_bps || 0) }; });
+            set("net-sub", historyNote(netSeries, t0, t1));
+            set("net-foot-left", from);
+            set("net-foot-right", "maintenant");
+            drawSpark(slot("net-chart"), netSeries, CURVE, CURVE_AREA, true, t0, t1);
+          } else {
+            // Pas de seuil d'alerte ici : être à son pic de débit n'est pas un
+            // incident, `paintBar` colorerait la jauge en rouge pour rien.
+            var netBar = slot("net-bar");
+            if (netBar) {
+              var netRatio = netPeak > 0 ? netTotal / netPeak : 0;
+              netBar.style.width = Math.max(0, Math.min(100, netRatio * 100)) + "%";
+            }
+            // Le pic est rappelé ici : sans lui, une jauge pleine laisserait
+            // croire à une saturation alors qu'elle dit seulement « au plus
+            // haut vu depuis l'ouverture de la page ».
+            set("net-sub", rated
+              ? ("↓ " + fmtRate(recv) + NBSP + "·" + NBSP + "↑ " + fmtRate(sent)
+                 + NBSP + "· pic " + fmtRate(netPeak))
+              : "mesure du débit en cours…");
+            set("net-foot-left", fmtBytes(cur.net_recv_bytes) + " reçus");
+            set("net-foot-right", fmtBytes(cur.net_sent_bytes) + " émis");
+          }
+
+          // --- Stockage : le volume de `data/`, collectes et sorties confondues
+          mode("disk", isHistory);
+          if (isHistory) {
+            var diskSeries = pts
+              .filter(function (p) { return p.disk_free_bytes; })
+              .map(function (p) { return { x: p.ts, y: p.disk_free_bytes }; });
+            set("disk-name", "Espace disponible");
+            set("disk", fmtBytes(disk.free));
+            set("disk-sub", historyNote(diskSeries, t0, t1));
+            set("disk-foot-left", from);
+            set("disk-foot-right", "maintenant");
+            // `false` : l'échelle ne part pas de zéro, sinon quelques Go de
+            // variation seraient écrasés au bas d'un volume de plusieurs To.
+            drawSpark(slot("disk-chart"), diskSeries, CURVE, CURVE_AREA, false, t0, t1);
+          } else {
+            set("disk-name", "Stockage");
+            set("disk", fmtPct(disk.percent));
+            set("disk-sub", fmtBytes(disk.free) + " libres sur " + fmtBytes(disk.total));
+            set("disk-foot-left", fmtBytes(disk.used) + " occupés");
+            set("disk-foot-right", fmtBytes(disk.total));
+            paintBar("disk", disk.used, disk.total);
+          }
+        })
+        .catch(function () { /* reessai au tick suivant */ })
+        .then(function () { inFlight = false; });
+    }
+
+    function tick() {
+      // Onglet en arrière-plan : le navigateur bride déjà les timers, et
+      // personne ne regarde. On reprend — immédiatement — au retour.
+      if (document.hidden) return;
+      refresh();
+    }
+
+    function schedule() {
+      if (timer) clearInterval(timer);
+      timer = setInterval(tick, range === "now" ? REFRESH_MS.now : REFRESH_MS.history);
+    }
+
+    buttons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        buttons.forEach(function (b) { b.classList.remove("active"); });
+        btn.classList.add("active");
+        range = btn.getAttribute("data-range");
+        refresh();
+        schedule();
+      });
+    });
+
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) refresh();
+    });
+
+    window.__dfirPerfRefresh = refresh;
+    refresh();
+    schedule();
+  })();
+</script>

@@ -1,0 +1,10 @@
+{# Polling permanent : la vue d'ensemble (statuts + ressources conteneur) se
+   rafraîchit sans F5. #}
+<div id="overview-status"
+     data-status-url="/investigations/{{ inv.id }}/overview/status"
+     hx-get="/investigations/{{ inv.id }}/overview/status"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML"
+     hx-sync="this:drop">
+  {% include "partials/_overview_body.html" %}
+</div>

@@ -1,0 +1,125 @@
+# Motifs d'ancrage du shimcache — `chainsaw analyse shimcache --regexfile`.
+#
+# À QUOI ÇA SERT. L'horodatage d'une entrée shimcache est la date de
+# MODIFICATION du fichier, pas celle de son exécution. Les entrées sont en
+# revanche empilées de la plus récente à la plus ancienne insertion. Chainsaw
+# reconstitue donc une chronologie en ancrant les entrées dont on peut affirmer
+# que « date de modification = date d'insertion », puis en encadrant les autres
+# entre deux ancres.
+#
+# Un bon motif désigne donc un fichier qui a été ÉCRIT AU MOMENT OÙ IL A ÉTÉ
+# LANCÉ : une charge déposée dans un dossier temporaire, un binaire téléchargé
+# puis exécuté, un outil copié sur la machine pendant l'intrusion.
+#
+# CE QUI N'EST PAS UN BON MOTIF. Un chemin où vivent des fichiers anciens :
+# `\Windows\System32\` ancrerait la chronologie sur la date de compilation de
+# binaires Microsoft. Un motif trop large ne rend pas l'analyse plus riche, il
+# pose de FAUSSES ancres et fausse tout ce qui est encadré par elles. Dans le
+# doute, ne l'ajoutez pas.
+#
+# Attention aussi : une copie Windows conserve la date de modification de la
+# source. Un outil copié depuis un partage garde sa date d'origine et sera une
+# fausse ancre. C'est une limite de la méthode, pas de ce fichier.
+#
+# FORMAT. Une expression régulière par ligne, syntaxe de la crate `regex` de
+# Rust : `(?i)` pour l'insensibilité à la casse, PAS de lookahead/lookbehind.
+# Les chemins sont en style Windows, donc `\\` pour un antislash littéral.
+# Les lignes vides et celles commençant par `#` sont retirées avant d'être
+# passées à Chainsaw (voir app/registry_shimcache.py) : commentez librement.
+
+# --- Emplacements temporaires et accessibles en écriture ---------------------
+# Le cœur de la méthode : on n'y dépose un exécutable que pour le lancer.
+(?i)\\users\\[^\\]+\\appdata\\local\\temp\\
+(?i)\\users\\[^\\]+\\appdata\\roaming\\
+(?i)\\users\\[^\\]+\\appdata\\local\\programs\\
+(?i)\\documents and settings\\[^\\]+\\local settings\\temp\\
+(?i)\\windows\\temp\\
+(?i)\\windows\\tasks\\
+(?i)\\windows\\debug\\
+(?i)\\windows\\addins\\
+(?i)\\windows\\fonts\\
+(?i)\\windows\\system32\\spool\\
+(?i)\\windows\\systemtemp\\
+(?i)\\windows\\syswow64\\config\\systemprofile\\appdata\\
+(?i)\\programdata\\[^\\]*\.(exe|dll|scr|com|pif|sys)$
+(?i)\\perflogs\\
+(?i)\\\$recycle\.bin\\
+(?i)\\recycler\\
+(?i)\\system volume information\\
+(?i)\\windows\\installer\\[^\\]*\.(exe|tmp)$
+
+# --- Arrivée sur la machine : téléchargement, pièce jointe, partage ----------
+(?i)\\users\\[^\\]+\\downloads\\
+(?i)\\users\\[^\\]+\\desktop\\[^\\]*\.(exe|scr|com|pif|bat|cmd|js|jse|vbs|wsf|hta|lnk)$
+(?i)\\appdata\\local\\microsoft\\windows\\inetcache\\
+(?i)\\appdata\\local\\microsoft\\windows\\temporary internet files\\
+(?i)\\content\.outlook\\
+(?i)\\appdata\\local\\packages\\[^\\]*\\(ac|localstate|tempstate)\\
+(?i)\\windows\\softwaredistribution\\download\\
+(?i)^\\\\[^\\]+\\[^\\]+\\
+(?i)^\\\\\\?\\unc\\
+
+# --- Décompression et installation sur place --------------------------------
+# Un installeur laisse son extraction dans un dossier daté de l'installation.
+(?i)\\temp\\(is-[a-z0-9]{6,8}|rar\$[a-z0-9]+|7z[a-z0-9]{4,}|_ir_sf_temp_|nsx?[a-z0-9]{4,})
+(?i)\\temp\\~?[a-z0-9]{6,8}\.tmp\\
+(?i)\\temp\\\{[0-9a-f-]{36}\}
+(?i)\\onedrive[^\\]*\\.*\.(exe|dll)$
+
+# --- Noms sans signification : générés, pas installés ------------------------
+(?i)\\[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.exe$
+(?i)\\[0-9a-f]{16,}\.(exe|dll|scr)$
+(?i)\\[a-z0-9]{1,3}\.exe$
+(?i)\\[^\\]*\.(exe|dll)\.(exe|dll|tmp|dat|bin|log|txt)$
+(?i)\\[^\\]*\s\.(exe|scr|com)$
+
+# --- Dump d'identifiants -----------------------------------------------------
+(?i)\\mimikatz|\\mimilib|\\mimidrv|\\safetykatz|\\sharpkatz|\\pypykatz
+(?i)\\procdump|\\pwdump|\\gsecdump|\\wce[0-9]*\.exe|\\secretsdump|\\lsassy
+(?i)\\nanodump|\\dumpert|\\sharpdump|\\lsass[^\\]*\.(exe|dmp)$|\\hivenightmare
+(?i)\\lazagne|\\nirsoft|\\webbrowserpassview|\\mailpassview|\\credentialsfileview
+
+# --- Exécution à distance et mouvement latéral --------------------------------
+(?i)\\psexec|\\psexesvc|\\paexec|\\remcom|\\csexec|\\pxexec
+(?i)\\wmiexec|\\smbexec|\\atexec|\\dcomexec|\\sharprdp|\\sharpwmi|\\sharpexec
+(?i)\\evil-winrm|\\impacket|\\crackmapexec|\\netexec|\\nxc\.exe
+
+# --- Élévation de privilèges ---------------------------------------------------
+(?i)\\(juicy|rotten|sweet|god|bad|efs)potato|\\printspoofer|\\spoolsample
+(?i)\\dsefix|\\kdmapper|\\gdrv|\\rtcore64|\\dbutil_?2_?3|\\physmem
+
+# --- Reconnaissance -----------------------------------------------------------
+(?i)\\adfind|\\bloodhound|\\sharphound|\\azurehound|\\adrecon|\\adexplorer
+(?i)\\seatbelt|\\sharpview|\\powerview|\\powerup|\\winpeas|\\linpeas
+(?i)\\pingcastle|\\snaffler|\\sharefinder|\\netview|\\ldapdomaindump
+(?i)\\advanced_?ip_?scanner|\\netscan|\\softperfect|\\nmap|\\masscan|\\angryip
+(?i)\\everything(32|64)?\.exe|\\fping|\\hping|\\portqry
+
+# --- Kerberos et AD ----------------------------------------------------------
+(?i)\\rubeus|\\kerbrute|\\certify|\\certipy|\\petitpotam|\\krbrelay
+(?i)\\responder|\\inveigh|\\mitm6|\\ntlmrelayx
+
+# --- Commande et contrôle -----------------------------------------------------
+(?i)\\cobaltstrike|\\beacon[^\\]*\.(exe|dll)|\\meterpreter|\\metsrv
+(?i)\\koadic|\\covenant|\\sliver|\\havoc|\\bruteratel|\\mythic|\\empire
+(?i)\\netcat|\\ncat|\\nc(64)?\.exe|\\socat|\\chisel|\\gost\.exe|\\frpc?\.exe
+(?i)\\ngrok|\\cloudflared|\\localtonet|\\playit|\\pagekite|\\bore\.exe|\\zerotier
+(?i)\\plink\.exe|\\stunnel|\\proxifier|\\proxychains|\\revsocks|\\iox\.exe
+
+# --- Exfiltration et mise en scène des données ---------------------------------
+(?i)\\rclone|\\megasync|\\megacmd|\\winscp|\\filezilla|\\pscp\.exe|\\psftp\.exe
+(?i)\\dropbox[^\\]*\\.*\.exe$|\\gdrive\.exe|\\odrive|\\mediafire|\\anonfiles
+
+# --- Prise de main à distance (légitime, mais pas forcément la vôtre) ----------
+(?i)\\anydesk|\\teamviewer|\\screenconnect|\\connectwise|\\atera|\\splashtop
+(?i)\\rustdesk|\\radmin|\\dwagent|\\supremo|\\netsupport|\\remoteutilities
+(?i)\\logmein|\\gotoassist|\\pulseway|\\kaseya|\\syncro|\\itarian|\\action1
+(?i)\\meshagent|\\tacticalrmm|\\level\.io|\\quickassist|\\ammyy|\\aeroadmin
+
+# --- Sabotage des défenses -----------------------------------------------------
+(?i)\\defendercontrol|\\nsudo|\\processhacker|\\gmer|\\pchunter|\\powertool
+(?i)\\iobit|\\gmer|\\tdsskiller|\\backstab|\\edrsandblast|\\realblindingedr
+
+# --- Effacement et rançon -------------------------------------------------------
+(?i)\\sdelete|\\bcwipe|\\eraser\.exe|\\usbdeview|\\privazer|\\ccleaner
+(?i)\\[^\\]*(locker|crypt|ransom|decrypt|readme)[^\\]*\.exe$

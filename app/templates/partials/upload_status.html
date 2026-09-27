@@ -1,0 +1,11 @@
+{# Toujours en polling (indépendamment de l'état) : garantit que la liste des
+   acquisitions se met à jour sans F5, y compris quand des fichiers sont déposés
+   à la main dans data/uploads/_pending/. #}
+<div id="upload-status-wrapper"
+     data-status-url="/investigations/{{ inv.id }}/upload/status"
+     hx-get="/investigations/{{ inv.id }}/upload/status"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML"
+     hx-sync="this:drop">
+  {% include "partials/upload_result.html" %}
+</div>

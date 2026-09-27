@@ -1,0 +1,31 @@
+{# Carte « Traitements » de l'onglet Paramètres : ce que l'orchestrateur a le
+   droit de lancer. Une case décochée arrête les démarrages automatiques ET le
+   bouton « Forcer » ; les traitements déjà terminés restent consultables.
+
+   Enregistrement au changement, sans bouton, comme la carte IA : la réponse
+   ne remplace que l'accusé de réception (swap hors cible). #}
+<div class="card">
+  <div class="card-head">
+    <h2 class="card-title">Traitements</h2>
+    <span class="card-note">{{ tools | selectattr("enabled") | list | length }} / {{ tools | length }} actifs</span>
+  </div>
+
+  <form class="settings-tools"
+        hx-post="/settings/tools"
+        hx-trigger="change"
+        hx-swap="none"
+        hx-sync="this:replace">
+    {% for tool in tools %}
+      <label class="settings-tool">
+        <input type="checkbox" name="tool" value="{{ tool.name }}"
+               {% if tool.enabled %}checked{% endif %}>
+        <span class="settings-tool-name">{{ tool.label }}</span>
+        <span class="settings-tool-note">
+          {%- if not tool.available %}outil indisponible sur cette instance
+          {%- elif tool.enabled %}démarre automatiquement
+          {%- else %}ne démarre pas{% endif -%}
+        </span>
+      </label>
+    {% endfor %}
+  </form>
+</div>

@@ -1,0 +1,10 @@
+{# `oob` vrai => la pastille voyage dans la reponse du fragment d en-tete et se
+   remplace toute seule dans la topbar (hx-swap-oob), sans requete dediee. #}
+<span id="state-pill"
+      {% if oob %}hx-swap-oob="true"{% endif %}
+      class="state-pill {% if headline.active %}is-running{% elif headline.runs_failed %}is-error{% else %}is-idle{% endif %}">
+  <span class="state-dot"></span>
+  {%- if headline.active %}Traitement en cours
+  {%- elif headline.runs_failed %}{{ headline.runs_failed }} traitement{{ "s" if headline.runs_failed > 1 }} en échec
+  {%- else %}Traitement au repos{% endif %}
+</span>

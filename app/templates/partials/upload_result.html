@@ -1,0 +1,67 @@
+<div id="upload-result">
+  {% if not inv.acquisitions %}
+    <div class="empty">Aucune acquisition pour le moment.</div>
+  {% else %}
+    {% for acq in inv.acquisitions.values() | sort(attribute="created_at") %}
+      {% set st = upload_status.per_acquisition.get(acq.id, {"missing": [], "complete": False}) %}
+      {% set f = facts_by_acq.get(acq.id, {}) %}
+      <div class="acq-block">
+        <div class="acq-block-head">
+          <span class="acq-block-name">{{ acq.name }}</span>
+          {% if st.complete %}
+            <span class="badge succeeded">complète</span>
+          {% elif not acq.outcome_filename %}
+            <span class="badge pending">Outcome.json attendu</span>
+          {% elif st.missing %}
+            <span class="badge running">{{ st.missing | length }} archive{{ "s" if st.missing | length > 1 }} manquante{{ "s" if st.missing | length > 1 }}</span>
+          {% else %}
+            <span class="badge pending">dépôt en cours</span>
+          {% endif %}
+          <span class="faint">reçue {{ f.received_at | relative_datetime }}</span>
+          <span class="acq-block-vol">
+            {{ acq.uploaded_filenames | length }} fichier{{ "s" if acq.uploaded_filenames | length > 1 }}
+            {%- if f.collect_bytes %} &middot; <b class="num">{{ f.collect_bytes | human_bytes }}</b>{% endif %}
+          </span>
+        </div>
+
+        <table class="table table-files">
+          <colgroup><col class="c-file"><col class="c-kind"><col class="c-size"><col class="c-act"></colgroup>
+          <thead>
+            <tr><th>Fichier</th><th>Type</th><th class="ta-right">Taille</th><th></th></tr>
+          </thead>
+          <tbody>
+            {% for fname in acq.uploaded_filenames %}
+              <tr>
+                <td class="num">{{ fname }}</td>
+                <td>
+                  {%- if fname == acq.outcome_filename %}<span class="badge kind kind-outcome">outcome</span>
+                  {%- elif fname.endswith('.7z') %}<span class="badge kind kind-archive">archive</span>
+                  {%- elif fname.endswith('_Outline.json') %}<span class="badge kind">outline</span>
+                  {%- elif fname.endswith('.log') %}<span class="badge kind">log</span>
+                  {%- else %}<span class="badge kind">fichier</span>{% endif -%}
+                </td>
+                <td class="num ta-right">{{ (f.file_sizes or {}).get(fname) | human_bytes }}</td>
+                <td>
+                  {% if uploads_enabled %}
+                    <button type="button" class="btn btn-sm btn-danger"
+                            hx-delete="/investigations/{{ inv.id }}/acquisitions/{{ acq.id }}/upload/{{ fname }}"
+                            hx-target="#upload-result" hx-swap="outerHTML"
+                            hx-confirm="Supprimer {{ fname }} ?">Supprimer</button>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+            {% for fname in st.missing %}
+              <tr class="row-pending">
+                <td class="num">{{ fname }}</td>
+                <td><span class="badge pending">attendue</span></td>
+                <td class="num ta-right">&mdash;</td>
+                <td></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endfor %}
+  {% endif %}
+</div>

@@ -1,0 +1,10 @@
+{# Toujours en polling : les statuts et métriques CPU/RAM des runs se
+   rafraîchissent sans F5. #}
+<div id="runs-status"
+     data-status-url="/investigations/{{ inv.id }}/runs/status"
+     hx-get="/investigations/{{ inv.id }}/runs/status"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML"
+     hx-sync="this:drop">
+  {% include "partials/_runs_status_body.html" %}
+</div>
